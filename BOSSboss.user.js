@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         BOSS'boss
-// @namespace https://github.com/jinyimumu-ctrl
-// @version      0.6.0-M6
-// @author       jinyimumu
-// @description  BOSS'boss 正式版：引导、重新生成、异常拦截与防御
+// @namespace    https://github.com/jinyimumu-ctrl
+// @version      0.6.6-M6
+// @description  BOSS'boss 正式版：完美解决列表页局部切换不刷新、标签抓取错乱问题
 // @match        https://www.zhipin.com/web/geek/*
 // @match        https://www.zhipin.com/job_detail/*
 // @grant        GM_registerMenuCommand
@@ -12,6 +11,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.deepseek.com
 // @run-at       document-idle
+// @author       jinyimumu
 // @updateURL    https://github.com/jinyimumu-ctrl/BOSS-boss/raw/refs/heads/main/BOSSboss.user.js
 // @downloadURL  https://github.com/jinyimumu-ctrl/BOSS-boss/raw/refs/heads/main/BOSSboss.user.js
 // ==/UserScript==
@@ -84,81 +84,113 @@
     }
 
     // ============================================================
-    // M2：职位详情页抓取
+    // M2：职位详情页抓取（精准限定作用域，防止抓错标签）
     // ============================================================
     function scrapeJobDetail() {
-        const hasJobTitle = pickText(['.job-banner .name h1', '.job-name h1', 'h1']);
-        if (!hasJobTitle) return null;
+        // 锁定右侧详情区域，绝不抓左侧列表的无关文字
+        const header = document.querySelector('.job-detail-header');
+        const container = header ? header.parentElement : document.querySelector('.job-detail-box');
+
+        let titleText = '';
+        if (container) titleText = pickText(['.job-name', 'h1'], container);
+        if (!titleText) titleText = pickText(['.job-banner .name h1', '.job-name', 'h1']);
+        if (!titleText) titleText = document.title.split('-')[0].trim().replace('BOSS直聘', '');
+        
         const data = {};
-        data.jobTitle = clean(hasJobTitle);
-        data.salary = decodePUA(clean(pickText(['.job-banner .name .salary', '.salary'])));
-        data.location = clean(pickText(['.job-banner p a.text-city', '.job-banner p .text-city'])) || '未知';
-        data.experience = clean(pickText(['.job-banner p .text-experiece', '.job-banner p span.text-experiece'])) || '不限';
-        data.education = clean(pickText(['.job-banner p .text-degree', '.job-banner p span.text-degree'])) || '不限';
-        const jdEl = document.querySelector('.job-detail .job-sec-text, .job-detail .text, .job-sec-text, [class*="job-detail"] .text');
-        data.jdText = jdEl ? clean(jdEl.innerText || jdEl.textContent) : '';
+        data.jobTitle = clean(titleText) || '未知岗位';
+        data.salary = decodePUA(clean(pickText(['.job-salary', '.job-banner .salary', '.salary'], container))) || '面议';
 
-        data.companyName = '(未抓到)';
-        data.companyScale = '(未抓到)';
-        data.companyStage = '未融资';
-        data.companyIndustry = '(未抓到)';
-        const companyNameEl = document.querySelector('.sider-company .company-info a[title]');
-        if (companyNameEl) data.companyName = companyNameEl.getAttribute('title');
-        const companyPs = document.querySelectorAll('.sider-company p');
-        companyPs.forEach(p => {
-            if (p.querySelector('.icon-scale')) data.companyScale = clean(p.textContent);
-            if (p.querySelector('.icon-industry')) data.companyIndustry = clean(p.textContent);
-            if (p.querySelector('.icon-stage') || /融资|上市|轮/.test(p.textContent)) data.companyStage = clean(p.textContent);
-        });
-
-        data.hrName = '';
-        data.hrTitle = '';
-        const hrNameEl = document.querySelector('.job-boss-info h2.name');
-        if (hrNameEl) {
-            const clone = hrNameEl.cloneNode(true);
-            const statusEl = clone.querySelector('.boss-active-time');
-            if (statusEl) statusEl.remove();
-            data.hrName = clean(clone.textContent);
+        // 地点 / 经验 / 学历（只看右侧的标签）
+        let loc = '', exp = '', edu = '';
+        if (container) {
+            const tagList = Array.from(container.querySelectorAll('.tag-list li, .info-primary .text')).map(el => clean(el.textContent));
+            if (tagList.length > 0) {
+                // 过滤掉岗位属性（如 B端产品、全职等）
+                const validTags = tagList.filter(t => t && t.length < 15 && !t.includes('产品') && !t.includes('全职'));
+                loc = validTags.find(t => /市|区|北京|上海|广州|深圳|杭州|成都|武汉|南京|西安|苏州|天津|重庆|长沙|郑州|东莞|青岛|合肥|佛山|宁波|厦门|福州|济南|大连|珠海|无锡|昆明|哈尔滨|长春|沈阳|石家庄|南昌|贵阳|太原|南宁|兰州|乌鲁木齐|海口|呼和浩特|银川|西宁|拉萨|香港|澳门|台北/.test(t)) || '';
+                exp = validTags.find(t => /天\/周|个月|\d+-\d+年|经验不限|应届/.test(t)) || '';
+                edu = validTags.find(t => /本科|大专|硕士|博士|中专|高中|学历不限/.test(t)) || '';
+            }
         }
-        const hrAttrEl = document.querySelector('.job-boss-info .boss-info-attr');
-        if (hrAttrEl) {
-            let attrText = clean(hrAttrEl.textContent);
-            if (data.companyName && attrText.includes(data.companyName)) attrText = attrText.replace(data.companyName, '');
-            data.hrTitle = attrText.replace(/^·\s*/, '').replace(/\s*·$/, '').trim();
+        data.location = loc || '未知';
+        data.experience = exp || '不限';
+        data.education = edu || '不限';
+
+        // JD 正文
+        let jdText = '';
+        const titleNodes = Array.from(document.querySelectorAll('h3, h2, .title')).filter(el => 
+            el.innerText.includes('职位描述') || el.innerText.includes('岗位职责')
+        );
+        if (titleNodes.length > 0) {
+            const jdContainer = titleNodes[0].parentElement;
+            if (jdContainer) {
+                jdText = jdContainer.innerText.replace('职位描述', '').replace('岗位职责', '').trim();
+            }
+        } 
+        if (!jdText || jdText.length < 20) {
+             const jdEl = document.querySelector('.job-detail-section .text, .job-sec-text, .job-detail-body .desc');
+             if (jdEl) jdText = jdEl.innerText || jdEl.textContent;
+        }
+        data.jdText = jdText ? clean(jdText.replace(/直聘|kanzhun|boss/ig, '')) : '';
+
+        // 公司信息与 HR
+        data.hrName = ''; data.hrTitle = ''; data.companyName = '(未抓到)';
+        data.companyScale = '(未抓到)'; data.companyStage = '未融资'; data.companyIndustry = '(未抓到)';
+
+        const hrBox = document.querySelector('.job-boss-info');
+        if (hrBox) {
+            const nameEl = hrBox.querySelector('h2.name, .name');
+            if (nameEl) {
+                const clone = nameEl.cloneNode(true);
+                const statusEl = clone.querySelector('.boss-active-time');
+                if (statusEl) statusEl.remove();
+                data.hrName = clean(clone.textContent);
+            }
+            const attrEl = hrBox.querySelector('.boss-info-attr');
+            if (attrEl) {
+                const attrText = clean(attrEl.textContent);
+                const parts = attrText.split('·').map(t => t.trim());
+                if (parts.length >= 2) { data.companyName = parts[0]; data.hrTitle = parts[1]; } 
+                else { data.hrTitle = attrText; }
+            }
+        }
+
+        const companyBox = document.querySelector('.sider-company');
+        if (companyBox) {
+             const nameEl = companyBox.querySelector('.company-info a[title]');
+             if (nameEl) data.companyName = nameEl.getAttribute('title');
+             const companyPs = companyBox.querySelectorAll('p');
+             companyPs.forEach(p => {
+                if (p.querySelector('.icon-scale')) data.companyScale = clean(p.textContent);
+                if (p.querySelector('.icon-industry')) data.companyIndustry = clean(p.textContent);
+                if (p.querySelector('.icon-stage') || /融资|上市|轮/.test(p.textContent)) data.companyStage = clean(p.textContent);
+             });
         }
         data.url = location.href;
         return data;
     }
 
     // ============================================================
-    // M3 核心：DeepSeek API 接入 + M6 重新生成 & 异常重试
+    // M3 核心：DeepSeek API 接入
     // ============================================================
     const SYSTEM_PROMPT = `你是一名资深求职咨询顾问，服务对象是一位正在BOSS直聘上投递简历的求职者。
 你的任务：基于「岗位信息」「公司信息」和「求职者档案」，输出两部分内容——一份顾问分析，一段可直接发送的打招呼话术。
 
 ## 核心原则
-1. **绝对禁止编造**：所有事实性内容（学校、专业、年级、经历、项目、技能、数据、到岗时间）只能来自求职者档案。你可以提炼、重组、润色语言，但不得添加档案中不存在的任何事实。档案里没有的，宁可不写。
-2. **公司信息诚实原则**：对该公司业务的描述，有检索依据就说依据，没有依据就写"公开信息有限"，且必须区分"事实"与"推测"，禁止把推测包装成事实。
-3. **咨询顾问视角**：分析要诚实、具体、有判断，不空泛客套。匹配就指出匹配点，不匹配就指出差距并给沟通建议。
-4. **读者是HR**：HR每天看几十上百条招呼。话术的生死线是"看起来像单独为我写的，而不是群发的"。
+1. **绝对禁止编造**：所有事实性内容只能来自求职者档案。不得添加档案中不存在的任何事实。
+2. **公司信息诚实原则**：对该公司业务的描述，必须区分"事实"与"推测"，禁止把推测包装成事实。
+3. **咨询顾问视角**：分析要诚实、具体、有判断。
+4. **读者是HR**：话术的生死线是"看起来像单独为我写的"。
 
 ## 输出第一部分：顾问分析（300字以内）
-依次回答：
-1. **岗位核心诉求**：这个岗位最看重什么（从JD提炼）
-2. **公司业务画像**：该公司是做什么的、核心产品/业务是什么、处于什么阶段（基于JD信息；信息不足时明说"公开信息有限"，推测内容须标注）
-3. **匹配点**：求职者档案中最对口的经历/技能（具体到项目）
-4. **差距与风险**（如有）
-5. **沟通策略建议**（一句话）
+依次回答：岗位核心诉求、公司业务画像、匹配点、差距与风险、沟通策略建议。
 
 ## 输出第二部分：打招呼话术
 硬性要求：
-1. **总字数严格控制在120-140字**（BOSS上限140字，必须留余量）
-2. **前18个字是生死线**：必须是**最强硬的经历数据**（数字优先，如"5年新媒体运营经验""独立做过0-1项目""心理学专业在读"），**禁止以"您好""你好"等空洞问候开头**；称呼放在数据之后自然衔接。
-3. 结构：硬数据钩子（前18字）→ 称呼+一句话身份 → 1-2个与JD直接对应的匹配点（用JD原文关键词）→ 一句收尾（求职意向+礼貌）
-4. 称呼规则：优先用HR昵称（如"梁老师"）；HR职位含"总监/合伙人/负责人"时用"姓氏+职位"；无HR姓名时自然省略称呼。
-5. 语气：真诚、自信、平等。不谄媚、不吹嘘。禁用"跪求""万分感谢""希望给我一次机会"等低姿态措辞；禁用"精通""专家""顶级"等档案无法支撑的夸大词。
-6. **公司/产品见解只进顾问分析，不进招呼词**。
-7. 禁止出现：档案中没有的证书/实习/项目/数字；无法兑现的承诺。
+1. **总字数严格控制在120-140字**。
+2. **前18个字是生死线**：必须是**最强硬的经历数据**，禁止空洞问候开头。
+3. 结构：硬数据钩子 → 称呼+一句话身份 → 匹配点（用JD原文关键词）→ 一句收尾。
+4. 语气：真诚、自信、平等。禁用"跪求"等低姿态措辞。
 
 ## 输出格式
 严格按以下格式输出，不要输出任何其他内容：
@@ -170,22 +202,13 @@
 
     function generateGreeting(jobData, userProfile, isRegenerate) {
         const apiKey = GM_getValue(STORAGE_KEY_API_KEY, '');
-        if (!apiKey) {
-            alert('请先在“我的档案”Tab 填写并保存你的 DeepSeek API Key！');
-            switchTab('profile');
-            return;
-        }
-        if (!userProfile || userProfile.trim() === '') {
-            alert('请先在“我的档案”Tab 填写你的个人档案！');
-            switchTab('profile');
-            return;
-        }
+        if (!apiKey) { alert('请先在“我的档案”Tab 填写并保存你的 DeepSeek API Key！'); switchTab('profile'); return; }
+        if (!userProfile || userProfile.trim() === '') { alert('请先在“我的档案”Tab 填写你的个人档案！'); switchTab('profile'); return; }
         if (!jobData.jdText || jobData.jdText.length < 10) {
             const confirmGen = confirm('⚠️ 未抓取到详细的 JD 原文，这可能会影响 AI 分析的准确度。\n\n确定要强行生成吗？');
             if (!confirmGen) return;
         }
 
-        // 重复投递提醒
         if (!isRegenerate) {
             const logs = GM_getValue(STORAGE_KEY_LOGS, []);
             const isDuplicate = logs.some(log => log.company === jobData.companyName && log.job === jobData.jobTitle);
@@ -197,51 +220,25 @@
 
         const btn = shadowRoot.getElementById('bb-generate-btn');
         const resultArea = shadowRoot.getElementById('bb-generate-result');
-        if (btn) {
-            btn.disabled = true;
-            btn.textContent = '正在分析并生成...';
-        }
+        if (btn) { btn.disabled = true; btn.textContent = '正在分析并生成...'; }
         resultArea.innerHTML = '<div class="bb-placeholder" style="text-align:center; padding: 20px;">AI 正在全力输出中，预计需要 5-10 秒...</div>';
 
-        let userMessage = `【岗位信息】
-职位：${jobData.jobTitle}
-公司：${jobData.companyName}（${jobData.companyStage}·${jobData.companyScale}·${jobData.companyIndustry}）
-薪资：${jobData.salary}｜地点：${jobData.location}｜要求：${jobData.experience}｜学历：${jobData.education}
-招聘者：${jobData.hrName}（${jobData.hrTitle}）
-
-【JD原文】
-${jobData.jdText}
-
-【我的档案】
-${userProfile}`;
-
-        // M6 重新生成指令
-        if (isRegenerate) {
-            userMessage += `\n\n【补充指令】\n请保持事实不变，换一种表达方式重新生成【顾问分析】和【招呼词】。`;
-        }
+        let userMessage = `【岗位信息】\n职位：${jobData.jobTitle}\n公司：${jobData.companyName}（${jobData.companyStage}·${jobData.companyScale}·${jobData.companyIndustry}）\n薪资：${jobData.salary}｜地点：${jobData.location}｜要求：${jobData.experience}｜学历：${jobData.education}\n招聘者：${jobData.hrName}（${jobData.hrTitle}）\n\n【JD原文】\n${jobData.jdText}\n\n【我的档案】\n${userProfile}`;
+        if (isRegenerate) { userMessage += `\n\n【补充指令】\n请保持事实不变，换一种表达方式重新生成【顾问分析】和【招呼词】。`; }
 
         GM_xmlhttpRequest({
             method: "POST",
             url: "https://api.deepseek.com/chat/completions",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + apiKey
-            },
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
             data: JSON.stringify({
                 model: "deepseek-chat",
-                messages: [
-                    { role: "system", content: SYSTEM_PROMPT },
-                    { role: "user", content: userMessage }
-                ],
-                temperature: 0.6, // 重新生成时稍微调高一点温度
+                messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userMessage }],
+                temperature: isRegenerate ? 0.7 : 0.5,
                 stream: false
             }),
             timeout: 30000,
             onload: function (response) {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = '一键生成招呼词';
-                }
+                if (btn) { btn.disabled = false; btn.textContent = '一键生成招呼词'; }
                 if (response.status === 200) {
                     try {
                         const resData = JSON.parse(response.responseText);
@@ -249,56 +246,27 @@ ${userProfile}`;
                         const parsed = parseResult(content);
                         if (parsed) {
                             GM_setValue(STORAGE_KEY_LAST_RESULT, {
-                                jobTitle: jobData.jobTitle,
-                                companyName: jobData.companyName,
-                                analysis: parsed.analysis,
-                                greeting: parsed.greeting
+                                jobTitle: jobData.jobTitle, companyName: jobData.companyName,
+                                analysis: parsed.analysis, greeting: parsed.greeting
                             });
-
-                            // 只有第一次生成才记录 Log，重新生成不重复记
-                            if (!isRegenerate) {
-                                addToLogs(jobData, parsed.greeting);
-                            }
-
+                            if (!isRegenerate) addToLogs(jobData, parsed.greeting);
                             renderResultHTML(parsed.analysis, parsed.greeting, resultArea, jobData, userProfile);
                         } else {
-                            resultArea.innerHTML = `
-                                <div class="bb-snapshot-empty">解析 AI 返回内容失败。</div>
-                                <button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重新尝试</button>
-                            `;
+                            resultArea.innerHTML = '<div class="bb-snapshot-empty">解析 AI 返回内容失败。</div><button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById(\'bb-generate-btn\').click()">重新尝试</button>';
                         }
                     } catch (e) {
-                        resultArea.innerHTML = `
-                            <div class="bb-snapshot-empty">解析 AI 返回内容失败。</div>
-                            <button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重新尝试</button>
-                        `;
+                        resultArea.innerHTML = '<div class="bb-snapshot-empty">解析 AI 返回内容失败。</div><button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById(\'bb-generate-btn\').click()">重新尝试</button>';
                     }
                 } else if (response.status === 401) {
-                    resultArea.innerHTML = '<div class="bb-snapshot-empty">API Key 无效，请去官网确认或重新填写。</div>';
-                    switchTab('profile');
+                    resultArea.innerHTML = '<div class="bb-snapshot-empty">API Key 无效，请去官网确认。</div>'; switchTab('profile');
                 } else if (response.status === 402) {
-                    resultArea.innerHTML = '<div class="bb-snapshot-empty">余额不足。请前往 DeepSeek 官网充值后重试。</div>';
+                    resultArea.innerHTML = '<div class="bb-snapshot-empty">余额不足。请前往 DeepSeek 官网充值。</div>';
                 } else {
-                    resultArea.innerHTML = `
-                        <div class="bb-snapshot-empty">请求失败 (错误码: ${response.status})。</div>
-                        <button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重试</button>
-                    `;
+                    resultArea.innerHTML = `<div class="bb-snapshot-empty">请求失败 (${response.status})。</div><button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重试</button>`;
                 }
             },
-            onerror: function () {
-                if (btn) { btn.disabled = false; btn.textContent = '一键生成招呼词'; }
-                resultArea.innerHTML = `
-                    <div class="bb-snapshot-empty">网络请求失败，请检查网络或代理。</div>
-                    <button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重试</button>
-                `;
-            },
-            ontimeout: function () {
-                if (btn) { btn.disabled = false; btn.textContent = '一键生成招呼词'; }
-                resultArea.innerHTML = `
-                    <div class="bb-snapshot-empty">请求超时，服务器可能正忙。</div>
-                    <button class="bb-btn bb-btn-outline" style="width: 100%; margin-top:8px;" onclick="document.getElementById('bb-generate-btn').click()">重试</button>
-                `;
-            }
+            onerror: function () { if (btn) { btn.disabled = false; btn.textContent = '一键生成招呼词'; } resultArea.innerHTML = '<div class="bb-snapshot-empty">网络请求失败。</div>'; },
+            ontimeout: function () { if (btn) { btn.disabled = false; btn.textContent = '一键生成招呼词'; } resultArea.innerHTML = '<div class="bb-snapshot-empty">请求超时。</div>'; }
         });
     }
 
@@ -306,28 +274,19 @@ ${userProfile}`;
         const analysisMatch = content.match(/【顾问分析】([\s\S]*?)(?=【招呼词】|$)/);
         const greetingMatch = content.match(/【招呼词】([\s\S]*?)$/);
         if (!analysisMatch && !greetingMatch) return null;
-        return {
-            analysis: analysisMatch ? analysisMatch[1].trim() : '未能解析出分析内容。',
-            greeting: greetingMatch ? greetingMatch[1].trim() : '未能解析出招呼词内容。'
-        };
+        return { analysis: analysisMatch ? analysisMatch[1].trim() : '未解析出分析。', greeting: greetingMatch ? greetingMatch[1].trim() : '未解析出招呼词。' };
     }
 
     function addToLogs(jobData, greeting) {
         const logs = GM_getValue(STORAGE_KEY_LOGS, []);
-        const newLog = {
-            time: new Date().toLocaleString('zh-CN', { hour12: false }),
-            company: jobData.companyName,
-            job: jobData.jobTitle,
-            greeting: greeting
-        };
-        logs.unshift(newLog);
+        logs.unshift({ time: new Date().toLocaleString('zh-CN', { hour12: false }), company: jobData.companyName, job: jobData.jobTitle, greeting: greeting });
         if (logs.length > 100) logs.pop();
         GM_setValue(STORAGE_KEY_LOGS, logs);
         renderLogsTab();
     }
 
     // ============================================================
-    // M4/M5/M6 核心：渲染、重新生成、填入
+    // M4/M5/M6 核心：渲染与填入
     // ============================================================
     function renderResultHTML(analysis, greeting, container, jobData, userProfile) {
         const html = `
@@ -341,14 +300,11 @@ ${userProfile}`;
                     <div id="bb-char-count" style="font-size: 11px; color: #6b7280;">0/140字</div>
                 </div>
                 <textarea class="bb-profile-input" id="bb-greeting-text" style="min-height: 100px; border-color: #0ea5e9; padding-bottom: 20px;">${escapeHtml(greeting)}</textarea>
-
                 <div style="display:flex; gap: 8px; margin-top: 8px;">
                     <button class="bb-btn bb-btn-outline" id="bb-regen-btn" style="flex:1;">🔄 重新生成</button>
                     <button class="bb-btn bb-btn-primary" id="bb-fill-btn" style="flex:2;">一键填入BOSS</button>
                 </div>
-                <div style="margin-top: 6px; font-size: 11.5px; color: #ea580c; text-align: center;">
-                    ⚠️ 填入后请手动按 Enter 发送（脚本绝不自动发送）
-                </div>
+                <div style="margin-top: 6px; font-size: 11.5px; color: #ea580c; text-align: center;">⚠️ 填入后请手动按 Enter 发送</div>
             </div>
         `;
         container.innerHTML = html;
@@ -361,125 +317,72 @@ ${userProfile}`;
         function updateCount() {
             const len = textArea.value.length;
             countDiv.textContent = `${len}/140字`;
-            if (len > 140) {
-                countDiv.style.color = '#dc2626';
-                countDiv.style.fontWeight = 'bold';
-            } else {
-                countDiv.style.color = '#6b7280';
-                countDiv.style.fontWeight = 'normal';
-            }
+            countDiv.style.color = len > 140 ? '#dc2626' : '#6b7280';
+            countDiv.style.fontWeight = len > 140 ? 'bold' : 'normal';
         }
 
         textArea.addEventListener('input', updateCount);
         updateCount();
 
-        // M6: 重新生成绑定
-        regenBtn.addEventListener('click', function () {
-            if (jobData && userProfile) {
-                generateGreeting(jobData, userProfile, true);
-            }
-        });
-
+        regenBtn.addEventListener('click', function () { if (jobData && userProfile) generateGreeting(jobData, userProfile, true); });
         fillBtn.addEventListener('click', function () {
             const finalGreeting = textArea.value;
-            if (!finalGreeting) {
-                alert('招呼词为空，无法填入。');
-                return;
-            }
-
+            if (!finalGreeting) { alert('招呼词为空。'); return; }
             const chatInput = findChatInput();
-            if (!chatInput) {
-                alert('未找到聊天输入框。请确认你当前处于聊天界面，并且聊天窗口已打开。');
-                return;
-            }
-
+            if (!chatInput) { alert('未找到聊天输入框，请先进入聊天界面。'); return; }
             setNativeValueAndDispatch(chatInput, finalGreeting);
             chatInput.focus();
-
-            fillBtn.textContent = '✅ 已填入，请按 Enter！';
-            fillBtn.style.background = '#16a34a';
-            setTimeout(() => {
-                fillBtn.textContent = '一键填入BOSS';
-                fillBtn.style.background = '#0ea5e9';
-            }, 3000);
+            fillBtn.textContent = '✅ 已填入，请按 Enter！'; fillBtn.style.background = '#16a34a';
+            setTimeout(() => { fillBtn.textContent = '一键填入BOSS'; fillBtn.style.background = '#0ea5e9'; }, 3000);
         });
     }
 
-    // ============================================================
-    // M5：投递记录渲染
-    // ============================================================
     function renderLogsTab() {
         if (!shadowRoot) return;
         const container = shadowRoot.getElementById('bb-logs-list');
         if (!container) return;
-
         const logs = GM_getValue(STORAGE_KEY_LOGS, []);
-        if (logs.length === 0) {
-            container.innerHTML = '<div class="bb-placeholder">暂无投递记录。每次生成招呼词后会自动记录。</div>';
-            return;
-        }
+        if (logs.length === 0) { container.innerHTML = '<div class="bb-placeholder">暂无投递记录。</div>'; return; }
 
-        let html = '<div style="margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;">';
-        html += `<span style="font-size:12px; color:#6b7280;">共 ${logs.length} 条记录</span>`;
-        html += `<button class="bb-btn bb-btn-outline" id="bb-copy-logs" style="padding: 4px 8px; font-size: 12px;">复制全部(MD)</button>`;
-        html += '</div>';
-
+        let html = `<div style="margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;"><span style="font-size:12px; color:#6b7280;">共 ${logs.length} 条</span><button class="bb-btn bb-btn-outline" id="bb-copy-logs" style="padding: 4px 8px; font-size: 12px;">复制全部(MD)</button></div>`;
         logs.forEach(log => {
-            html += `
-                <div style="border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin-bottom: 8px; background: #f9fafb;">
-                    <div style="font-size: 11px; color: #6b7280; margin-bottom: 4px;">${log.time}</div>
-                    <div style="font-weight: 600; font-size: 13px; margin-bottom: 2px;">${escapeHtml(log.company)}</div>
-                    <div style="font-size: 12px; color: #374151; margin-bottom: 6px;">${escapeHtml(log.job)}</div>
-                    <div style="font-size: 11px; color: #6b7280; background: #fff; padding: 6px; border-radius: 4px; border: 1px solid #f3f4f6;">${escapeHtml(log.greeting)}</div>
-                </div>
-            `;
+            html += `<div style="border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin-bottom: 8px; background: #f9fafb;"><div style="font-size: 11px; color: #6b7280; margin-bottom: 4px;">${log.time}</div><div style="font-weight: 600; font-size: 13px; margin-bottom: 2px;">${escapeHtml(log.company)}</div><div style="font-size: 12px; color: #374151; margin-bottom: 6px;">${escapeHtml(log.job)}</div><div style="font-size: 11px; color: #6b7280; background: #fff; padding: 6px; border-radius: 4px; border: 1px solid #f3f4f6;">${escapeHtml(log.greeting)}</div></div>`;
         });
         container.innerHTML = html;
 
         container.querySelector('#bb-copy-logs').addEventListener('click', function() {
-            let md = `# 投递记录导出 (${new Date().toLocaleDateString()})\n\n`;
-            md += `| 时间 | 公司 | 岗位 | 招呼词 |\n|---|---|---|---|\n`;
-            logs.forEach(log => {
-                const cleanGreeting = log.greeting.replace(/\n/g, ' ');
-                md += `| ${log.time} | ${log.company} | ${log.job} | ${cleanGreeting} |\n`;
-            });
-
-            navigator.clipboard.writeText(md).then(() => {
-                alert('✅ 已复制到剪贴板！');
-            }).catch(err => {
-                alert('❌ 复制失败，可能是浏览器限制了剪贴板权限。');
-            });
+            let md = `# 投递记录导出 (${new Date().toLocaleDateString()})\n\n| 时间 | 公司 | 岗位 | 招呼词 |\n|---|---|---|---|\n`;
+            logs.forEach(log => { md += `| ${log.time} | ${log.company} | ${log.job} | ${log.greeting.replace(/\n/g, ' ')} |\n`; });
+            navigator.clipboard.writeText(md).then(() => alert('✅ 已复制到剪贴板！')).catch(err => alert('❌ 复制失败。'));
         });
     }
 
     // ============================================================
-    // 页面模式判断 + 智能抓取重试 + 状态恢复
+    // 页面状态监听（彻底解决局部刷新残留问题）
     // ============================================================
     let currentPageMode = 'unknown';
-    let lastRouteKey = '';
-    let scrapeRetryCount = 0;
     let scrapeTimer = null;
 
     function detectPageMode() {
-        const isJobDetailUrl = /\/job_detail\//.test(location.pathname);
-        const hasBanner = document.querySelector('.job-banner');
-        if (isJobDetailUrl || hasBanner) return 'job_detail';
         if (/\/web\/geek\/chat/.test(location.pathname)) return 'chat';
+        const text = document.body.innerText || '';
+        if (text.includes('职位描述') || text.includes('岗位职责') || text.includes('任职要求')) return 'job_detail';
         return 'other';
     }
 
-    function onRouteMaybeChanged() {
-        const routeKey = location.pathname + location.search;
-        if (routeKey === lastRouteKey) return;
-        lastRouteKey = routeKey;
-        const mode = detectPageMode();
-
-        updatePanelForMode(mode);
-
-        if (mode === 'job_detail') {
-            scrapeRetryCount = 0;
-            tryScrapeJob(1500);
-        }
+    function observeDOM() {
+        const observer = new MutationObserver(() => {
+            if (window.observerTimer) clearTimeout(window.observerTimer);
+            window.observerTimer = setTimeout(() => {
+                const mode = detectPageMode();
+                currentPageMode = mode;
+                updatePanelForMode(mode);
+                if (mode === 'job_detail') {
+                    tryScrapeJob(300); // 只要 DOM 变了且在详情页，立刻抓取
+                }
+            }, 500); 
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     }
 
     function tryScrapeJob(delay) {
@@ -487,42 +390,34 @@ ${userProfile}`;
         scrapeTimer = setTimeout(function () {
             const data = scrapeJobDetail();
             if (data) {
+                const oldData = GM_getValue(STORAGE_KEY_LAST_JOB, null);
+                // 🌟 核心修复：如果岗位变了，立刻清空之前的招呼词！
+                const isDifferentJob = !oldData || oldData.jobTitle !== data.jobTitle || oldData.companyName !== data.companyName;
+                
                 GM_setValue(STORAGE_KEY_LAST_JOB, data);
                 renderJobSnapshot(data);
-                scrapeRetryCount = 0;
-            } else if (scrapeRetryCount < 5) {
-                scrapeRetryCount++;
-                tryScrapeJob(1000);
+                
+                if (isDifferentJob) {
+                     shadowRoot.getElementById('bb-generate-result').innerHTML = '';
+                     GM_setValue(STORAGE_KEY_LAST_RESULT, null);
+                }
             } else {
                 renderJobSnapshot(null);
             }
         }, delay);
     }
 
-    (function hookHistory() {
-        ['pushState', 'replaceState'].forEach(function (name) {
-            const orig = history[name];
-            history[name] = function () {
-                const ret = orig.apply(this, arguments);
-                onRouteMaybeChanged();
-                return ret;
-            };
-        });
-        window.addEventListener('popstate', onRouteMaybeChanged);
-        let lastHref = location.href;
-        setInterval(function () {
-            if (location.href !== lastHref) {
-                lastHref = location.href;
-                onRouteMaybeChanged();
-            }
-        }, 800);
-    })();
-
     // ============================================================
     // 面板UI
     // ============================================================
     let panelHost = null;
     let shadowRoot = null;
+
+    function dumpHTML() {
+        const mainArea = document.querySelector('.job-detail-header') || document.querySelector('.job-detail-box') || document.querySelector('.job-banner')?.parentNode || document.querySelector('.main-wrap') || document.body;
+        const text = `===== 当前页面结构 =====\nURL: ${location.href}\n模式判定: ${detectPageMode()}\n\n${mainArea.innerHTML.substring(0, 8000)}`;
+        navigator.clipboard.writeText(text).then(() => alert('✅ 页面代码已复制！')).catch(err => alert('❌ 复制失败。'));
+    }
 
     function buildPanelHTML() {
         return `
@@ -566,7 +461,7 @@ ${userProfile}`;
 
         <div class="bb-panel" id="bb-panel">
             <div class="bb-header">
-                <span class="bb-title">BOSS'boss <small style="font-weight:400;opacity:0.85">M6</small></span>
+                <span class="bb-title">BOSS'boss <small style="font-weight:400;opacity:0.85">v1.0.6</small></span>
                 <button class="bb-collapse-btn" id="bb-collapse">收起</button>
             </div>
             <div class="bb-tabs">
@@ -583,14 +478,16 @@ ${userProfile}`;
                         <button class="bb-btn bb-btn-primary" id="bb-generate-btn" style="width: 100%;" disabled>一键生成招呼词</button>
                     </div>
                     <div id="bb-generate-result" style="margin-top: 12px;"></div>
+                    
+                    <div style="margin-top: 20px; border-top: 1px dashed #e5e7eb; padding-top: 10px; text-align: center;">
+                         <button class="bb-btn bb-btn-outline" id="bb-dump-html" style="font-size: 11px; padding: 4px; width: 100%; color: #6b7280;">复制页面代码（调试用）</button>
+                    </div>
                 </div>
                 <div class="bb-tab-content" data-content="profile">
                     <div class="bb-form-group">
                         <label>DeepSeek API Key (必填)</label>
                         <input type="password" id="bb-apikey-input" class="bb-profile-input" style="min-height: 32px; padding: 6px;" placeholder="sk-...">
-                        <div style="margin-top: 4px;">
-                            <a href="https://platform.deepseek.com/" target="_blank" class="bb-link">👉 点此去 DeepSeek 获取 API Key (仅需几元)</a>
-                        </div>
+                        <div style="margin-top: 4px;"><a href="https://platform.deepseek.com/" target="_blank" class="bb-link">👉 点此去 DeepSeek 获取 API Key</a></div>
                     </div>
                     <div class="bb-form-group">
                         <label>个人档案 (乱写没关系，AI会整理)</label>
@@ -613,17 +510,10 @@ ${userProfile}`;
     }
 
     function switchTab(name) {
-        shadowRoot.querySelectorAll('.bb-tab').forEach(function (btn) {
-            btn.classList.toggle('active', btn.dataset.tab === name);
-        });
-        shadowRoot.querySelectorAll('.bb-tab-content').forEach(function (c) {
-            c.classList.toggle('active', c.dataset.content === name);
-        });
+        shadowRoot.querySelectorAll('.bb-tab').forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === name); });
+        shadowRoot.querySelectorAll('.bb-tab-content').forEach(function (c) { c.classList.toggle('active', c.dataset.content === name); });
         GM_setValue(STORAGE_KEY_ACTIVE_TAB, name);
-
-        if (name === 'logs') {
-            renderLogsTab();
-        }
+        if (name === 'logs') renderLogsTab();
     }
 
     function setCollapsed(collapsed, persist) {
@@ -638,7 +528,6 @@ ${userProfile}`;
         const snapshot = shadowRoot.getElementById('bb-job-snapshot');
         const genBtn = shadowRoot.getElementById('bb-generate-btn');
         const resultArea = shadowRoot.getElementById('bb-generate-result');
-
         const lastResult = GM_getValue(STORAGE_KEY_LAST_RESULT, null);
         const userProfile = GM_getValue(STORAGE_KEY_PROFILE, '');
 
@@ -654,10 +543,8 @@ ${userProfile}`;
                 }
             }
         } else if (mode === 'chat') {
-            genBtn.disabled = true;
-            genBtn.style.display = 'none';
+            genBtn.disabled = true; genBtn.style.display = 'none';
             snapshot.innerHTML = '<div class="bb-placeholder" style="color:#16a34a; font-weight:bold;">当前在聊天界面，已为你恢复最新生成的招呼词。</div>';
-
             if (lastResult) {
                 const jobData = GM_getValue(STORAGE_KEY_LAST_JOB, null);
                 renderResultHTML(lastResult.analysis, lastResult.greeting, resultArea, jobData, userProfile);
@@ -666,9 +553,7 @@ ${userProfile}`;
             }
         } else {
             snapshot.innerHTML = '<div class="bb-placeholder">当前不在职位详情页。请打开职位页。</div>';
-            genBtn.disabled = true;
-            genBtn.style.display = 'block';
-            resultArea.innerHTML = '';
+            genBtn.disabled = true; genBtn.style.display = 'block'; resultArea.innerHTML = '';
         }
     }
 
@@ -676,10 +561,7 @@ ${userProfile}`;
         if (!shadowRoot) return;
         const container = shadowRoot.getElementById('bb-job-snapshot');
         if (!container) return;
-        if (!data) {
-            container.innerHTML = '<div class="bb-placeholder">未能抓取到岗位信息。请刷新页面重试。</div>';
-            return;
-        }
+        if (!data) { container.innerHTML = '<div class="bb-placeholder">未能抓取到岗位信息。请刷新页面重试。</div>'; return; }
 
         const fields = [
             ['岗位', data.jobTitle], ['薪资', data.salary], ['地点', data.location],
@@ -707,11 +589,10 @@ ${userProfile}`;
         shadowRoot = panelHost.attachShadow({ mode: 'open' });
         shadowRoot.innerHTML = buildPanelHTML();
 
-        shadowRoot.querySelectorAll('.bb-tab').forEach(function (btn) {
-            btn.addEventListener('click', function () { switchTab(btn.dataset.tab); });
-        });
+        shadowRoot.querySelectorAll('.bb-tab').forEach(function (btn) { btn.addEventListener('click', function () { switchTab(btn.dataset.tab); }); });
         shadowRoot.getElementById('bb-collapse').addEventListener('click', function () { setCollapsed(true); });
         shadowRoot.getElementById('bb-collapsed-bar').addEventListener('click', function () { setCollapsed(false); });
+        shadowRoot.getElementById('bb-dump-html').addEventListener('click', dumpHTML);
 
         const apiKeyInput = shadowRoot.getElementById('bb-apikey-input');
         const profileInput = shadowRoot.getElementById('bb-profile-input');
@@ -722,39 +603,25 @@ ${userProfile}`;
             GM_setValue(STORAGE_KEY_API_KEY, apiKeyInput.value.trim());
             GM_setValue(STORAGE_KEY_PROFILE, profileInput.value);
             const status = shadowRoot.getElementById('bb-profile-status');
-            status.textContent = '已保存';
-            setTimeout(function () { status.textContent = ''; }, 3000);
+            status.textContent = '已保存'; setTimeout(function () { status.textContent = ''; }, 3000);
         });
 
         shadowRoot.getElementById('bb-copy-profile').addEventListener('click', function () {
-            navigator.clipboard.writeText(profileInput.value).then(() => {
-                alert('✅ 档案已复制到剪贴板！');
-            }).catch(err => {
-                alert('❌ 复制失败，请手动全选复制。');
-            });
+            navigator.clipboard.writeText(profileInput.value).then(() => alert('✅ 档案已复制！')).catch(err => alert('❌ 复制失败。'));
         });
 
         shadowRoot.getElementById('bb-import-profile').addEventListener('click', async function () {
             try {
                 const text = await navigator.clipboard.readText();
-                if (text) {
-                    profileInput.value = text;
-                    alert('✅ 已从剪贴板导入内容，请确认无误后点击“保存设置”。');
-                } else {
-                    alert('剪贴板为空。');
-                }
-            } catch (err) {
-                alert('❌ 浏览器拒绝读取剪贴板。请手动在文本框内粘贴。');
-            }
+                if (text) { profileInput.value = text; alert('✅ 已导入，请点击保存。'); } 
+                else { alert('剪贴板为空。'); }
+            } catch (err) { alert('❌ 浏览器拒绝读取剪贴板。'); }
         });
 
         shadowRoot.getElementById('bb-generate-btn').addEventListener('click', function () {
             const jobData = GM_getValue(STORAGE_KEY_LAST_JOB, null);
             const userProfile = GM_getValue(STORAGE_KEY_PROFILE, '');
-            if (!jobData) {
-                alert('未获取到当前岗位信息，请刷新或重新抓取。');
-                return;
-            }
+            if (!jobData) { alert('未获取到当前岗位信息，请刷新。'); return; }
             generateGreeting(jobData, userProfile, false);
         });
 
@@ -763,13 +630,13 @@ ${userProfile}`;
         switchTab(GM_getValue(STORAGE_KEY_ACTIVE_TAB, 'generate'));
 
         currentPageMode = detectPageMode();
-        lastRouteKey = location.pathname + location.search;
         updatePanelForMode(currentPageMode);
 
         if (currentPageMode === 'job_detail') {
-            scrapeRetryCount = 0;
-            tryScrapeJob(1500);
+            tryScrapeJob(1000);
         }
+        
+        observeDOM();
     }
 
     function boot() {
