@@ -11,6 +11,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.deepseek.com
 // @run-at       document-idle
+// @updateURL    https://github.com/jinyimumu-ctrl/BOSS-boss/raw/refs/heads/main/BOSSboss.user.js
+// @downloadURL  https://github.com/jinyimumu-ctrl/BOSS-boss/raw/refs/heads/main/BOSSboss.user.js
 // ==/UserScript==
 
 (function () {
