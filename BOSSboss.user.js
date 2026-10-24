@@ -2,6 +2,7 @@
 // @name         BOSS'boss
 // @namespace https://github.com/jinyimumu-ctrl
 // @version      0.6.0-M6
+// @author       jinyimumu
 // @description  BOSS'boss 正式版：引导、重新生成、异常拦截与防御
 // @match        https://www.zhipin.com/web/geek/*
 // @match        https://www.zhipin.com/job_detail/*
